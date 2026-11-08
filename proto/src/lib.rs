@@ -2,6 +2,9 @@
 //! and sent as binary WebSocket frames over TLS.
 use serde::{Deserialize, Serialize};
 
+pub mod theme;
+pub use theme::ThemeColors;
+
 pub const DEFAULT_PORT: u16 = 7878;
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
@@ -39,6 +42,7 @@ pub enum HostMsg {
     Stats(Stats),
     Pong,
     Error(String),
+    Theme(ThemeColors),
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, Default)]

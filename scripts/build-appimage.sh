@@ -7,8 +7,8 @@ export PATH="$HOME/.cargo/bin:$PATH"
 cargo build --release -p pccontrol-host -p pccontrol
 A="$ROOT/target/AppDir"; rm -rf "$A"; mkdir -p "$A/usr/bin" "$A/usr/share/pc-control" dist
 cp target/release/pccontrol-host target/release/pccontrol "$A/usr/bin/"
-cp packaging/install.sh packaging/icon.png packaging/pc-control.desktop "$A/usr/share/pc-control/"
-cp packaging/icon.png "$A/pc-control.png"; cp packaging/pc-control.desktop "$A/pc-control.desktop"
+cp packaging/install.sh packaging/icon.png packaging/pccontrol.desktop "$A/usr/share/pc-control/"
+cp packaging/icon.png "$A/pc-control.png"; cp packaging/pccontrol.desktop "$A/pccontrol.desktop"
 cat > "$A/AppRun" <<'RUN'
 #!/bin/sh
 HERE="$(dirname "$(readlink -f "$0")")"

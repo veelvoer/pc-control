@@ -23,6 +23,7 @@ pub enum Event {
     Connected(String),
     Frame(eframe::egui::ColorImage),
     Stats(Stats),
+    Theme(proto::ThemeColors),
     /// Fatal for this session (e.g. wrong token); no auto-retry.
     Fatal(String),
     /// Transient; the worker retries.
@@ -154,6 +155,7 @@ async fn session(
                         Err(_) => true,
                     },
                     Some(HostMsg::Stats(s)) => send(Event::Stats(s)),
+                    Some(HostMsg::Theme(t)) => send(Event::Theme(t)),
                     Some(HostMsg::Error(e)) => send(Event::HostError(e)),
                     _ => true,
                 };

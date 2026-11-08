@@ -1,6 +1,10 @@
+#![allow(deprecated, dead_code)]
+mod icons;
 mod keys;
 mod net;
+mod theme;
 mod ui;
+mod widgets;
 
 use std::path::PathBuf;
 
@@ -9,8 +13,20 @@ pub static ANDROID_APP: std::sync::OnceLock<android_activity::AndroidApp> = std:
 
 fn options() -> eframe::NativeOptions {
     eframe::NativeOptions {
-        viewport: eframe::egui::ViewportBuilder::default().with_title("PC Control").with_inner_size([1100.0, 700.0]).with_app_id("pccontrol"),
+        viewport: eframe::egui::ViewportBuilder::default()
+            .with_title("PC Control")
+            .with_inner_size([1180.0, 760.0])
+            .with_min_inner_size([380.0, 560.0])
+            .with_app_id("pccontrol")
+            .with_icon(icon()),
         ..Default::default()
+    }
+}
+
+fn icon() -> eframe::egui::IconData {
+    match image::load_from_memory(include_bytes!("../../packaging/icon.png")) {
+        Ok(i) => { let i = i.to_rgba8(); eframe::egui::IconData { width: i.width(), height: i.height(), rgba: i.into_raw() } }
+        Err(_) => Default::default(),
     }
 }
 

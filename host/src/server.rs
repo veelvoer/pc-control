@@ -35,7 +35,10 @@ pub async fn run(cfg: Config, port: u16) -> Result<()> {
                 let _ = sock.set_nodelay(true);
                 let (acc, inj, token) = (acceptor.clone(), inj.clone(), token.clone());
                 tokio::spawn(async move {
-                    if let Err(e) = conn(sock, acc, inj, token).await { eprintln!("{peer}: {e:#}"); }
+                    if let Err(e) = conn(sock, acc, inj, token).await {
+                        // Clients that just close the socket (app killed, phone asleep) are routine.
+                        if !format!("{e:#}").contains("close_notify") { eprintln!("{peer}: {e:#}"); }
+                    }
                 });
             }
             _ = tokio::signal::ctrl_c() => return Ok(()),
@@ -65,13 +68,26 @@ async fn conn(sock: tokio::net::TcpStream, acc: TlsAcceptor, inj: Shared, token:
     }
     let hostname = std::fs::read_to_string("/etc/hostname").map(|s| s.trim().to_string()).unwrap_or_else(|_| "pc".into());
     wr.send(Message::Binary(enc(&HostMsg::AuthOk { hostname }).into())).await?;
-    if inj.lock().unwrap().is_none() {
+    // The service can start before logind grants /dev/uinput access at login, so retry per connection.
+    let unavailable = {
+        let mut g = inj.lock().unwrap();
+        if g.is_none() {
+            match Injector::new() {
+                Ok(i) => *g = Some(i),
+                Err(e) => eprintln!("input disabled: {e:#}"),
+            }
+        }
+        g.is_none()
+    };
+    if unavailable {
         wr.send(Message::Binary(enc(&HostMsg::Error("input injection unavailable: no access to /dev/uinput".into())).into())).await?;
     }
 
     let (ftx, mut frx) = mpsc::channel::<Vec<u8>>(1);
     let mut stop = StopOnDrop(Arc::new(AtomicBool::new(true)));
     let mut sampler = Sampler::new();
+    let mut theme: Option<proto::ThemeColors> = None;
+    let mut ticks = 0u32;
     let mut tick = tokio::time::interval(Duration::from_secs(1));
     tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
 
@@ -105,6 +121,13 @@ async fn conn(sock: tokio::net::TcpStream, acc: TlsAcceptor, inj: Shared, token:
                 }
             }
             _ = tick.tick() => {
+                // Theme is re-checked every 5s while a client is connected (portal lookups shell out, so off the async path).
+                if ticks % 5 == 0 {
+                    if let Ok(t) = tokio::task::spawn_blocking(|| proto::theme::detect(true)).await {
+                        if t != theme { theme = t.clone(); if let Some(t) = t { wr.send(Message::Binary(enc(&HostMsg::Theme(t)).into())).await?; } }
+                    }
+                }
+                ticks += 1;
                 wr.send(Message::Binary(enc(&HostMsg::Stats(sampler.sample())).into())).await?;
             }
             Some(f) = frx.recv() => wr.send(Message::Binary(f.into())).await?,

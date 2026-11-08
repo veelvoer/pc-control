@@ -6,3 +6,4 @@ Exec=pccontrol
 Icon=pc-control
 Categories=Network;RemoteAccess;
 Terminal=false
+StartupWMClass=pccontrol

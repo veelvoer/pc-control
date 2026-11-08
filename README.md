@@ -3,7 +3,8 @@
 Lightweight Rust remote control for a Linux PC: live screen, mouse/keyboard, system stats and power actions, from your phone (APK) or another PC.
 
 - **Host** (`pccontrol-host`): tiny daemon (~5 MB RAM, 0% CPU when no client is connected). Captures the screen only while a client is viewing it, skips unchanged frames, injects input through `uinput`.
-- **Client** (`pccontrol`): one egui app for Android and Linux desktop.
+- **Client** (`pccontrol`): one egui app for Android and Linux desktop. The phone gets the remote screen, touch/keyboard control, dashboard and power actions; the desktop app is dashboard + power only (no screen view) and connects to the local host automatically.
+- **Theming**: the desktop app follows your desktop colours (Hearth/Quickshell, KDE `kdeglobals`, GTK `@define-color` files, or the XDG portal light/dark + accent, which covers GNOME and most others). The host forwards the same colours to the phone, so both match your PC; this can be switched off in Settings.
 - **Security**: TLS with a self-signed certificate pinned via the pairing code, plus a random token. Don't expose port 7878 to the internet; use Tailscale/WireGuard when away from home.
 
 ## Install (Arch / Linux PC)
@@ -36,3 +37,4 @@ scripts/build-apk.sh                     # dist/pc-control.apk (needs Android SD
 - Capture needs a wlroots screencopy compositor (not GNOME/KDE yet); the first output/all outputs are captured.
 - Remote text input is US-layout ASCII; other characters are ignored.
 - The Android build is untested on hardware at the time of writing.
+- Theme detection is checked on Hearth only; KDE/GTK/portal paths are unit-tested parsers.
