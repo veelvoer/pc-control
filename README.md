@@ -7,6 +7,14 @@ Lightweight Rust remote control for a Linux PC: live screen, mouse/keyboard, sys
 - **Theming**: the desktop app follows your desktop colours (Hearth/Quickshell, KDE `kdeglobals`, GTK `@define-color` files, or the XDG portal light/dark + accent, which covers GNOME and most others). The host forwards the same colours to the phone, so both match your PC; this can be switched off in Settings.
 - **Security**: TLS with a self-signed certificate pinned via the pairing code, plus a random token. Don't expose port 7878 to the internet; use Tailscale/WireGuard when away from home.
 
+![Dashboard](docs/screenshots/a2-d-dash-mid.png)
+
+| Phone: dashboard | Phone: screen | Phone: settings |
+|---|---|---|
+| ![](docs/screenshots/a-m-dash.png) | ![](docs/screenshots/a2-m-screen.png) | ![](docs/screenshots/a-m-settings.png) |
+
+`docs/screenshots/b-*.png` are the visual bugs found during polishing (layout overflow on narrow windows, low-contrast confirm tile, oversized sliders, …); `a-*.png` are the fixed versions. They were captured with `scripts/dev-shot.sh`.
+
 ## Install (Arch / Linux PC)
 
 ```bash

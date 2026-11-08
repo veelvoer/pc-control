@@ -66,6 +66,10 @@ pub struct App {
     last_move: Option<(Pos2, Instant)>,
     stream_sent: Option<(Tab, u8, u32, u8)>,
     confirm: Option<(PowerAction, Instant)>,
+    logo: egui::TextureHandle,
+    compact: bool,
+    rotate_hint: bool,
+    dev_scroll: Option<f32>,
 }
 
 fn local_pairing() -> Option<Pairing> {
@@ -85,7 +89,7 @@ impl App {
         let palette = Palette::from_system(dark);
         theme::apply(ctx, &palette);
         let code = std::fs::read_to_string(&cfg).unwrap_or_default().trim().to_string();
-        let local = if MOBILE { None } else { local_pairing() };
+        let local = if MOBILE && !cfg!(feature = "mobile-preview") { None } else { local_pairing() };
         let theme_rx = if MOBILE { None } else {
             let (tx, rx) = mpsc::channel();
             let c = ctx.clone();
@@ -104,12 +108,19 @@ impl App {
             tab: if MOBILE { Tab::Screen } else { Tab::Dashboard }, palette, host_theme: None, local_theme: None, theme_rx, settings, local,
             touch_seen: false, drag_mode: false, right_next: false, kb_open: false, sticky: [false; 4], phys: [false; 3],
             scroll_acc: 0.0, last_move: None, stream_sent: None, confirm: None,
+            compact: MOBILE, rotate_hint: true,
+            logo: ctx.load_texture("logo", logo_image(), egui::TextureOptions::LINEAR),
+            dev_scroll: std::env::var("PCC_SCROLL").ok().and_then(|v| v.parse().ok()), // dev aid for screenshots
         };
         match std::env::var("PCC_TAB").as_deref() { // dev aid: start on a given tab
             Ok("power") => app.tab = Tab::Power,
             Ok("settings") => app.tab = Tab::Settings,
+            Ok("dashboard") => app.tab = Tab::Dashboard,
+            Ok("screen") => app.tab = Tab::Screen,
             _ => {}
         }
+        if std::env::var_os("PCC_ONBOARD").is_some() { return app; } // dev aid: show the pairing screen
+        if std::env::var_os("PCC_CONFIRM").is_some() { app.confirm = Some((PowerAction::Reboot, Instant::now() + Duration::from_secs(3600))); }
         if Pairing::parse(&app.code).is_some() { app.connect(ctx); } else if app.local.is_some() { app.connect_local(ctx); }
         app
     }
@@ -123,7 +134,7 @@ impl App {
     fn connect(&mut self, ctx: &egui::Context) {
         match Pairing::parse(&self.code) {
             Some(p) => { let _ = std::fs::write(&self.cfg, &self.code); self.connect_with(ctx, p); }
-            None => self.note = Some("That doesn't look like a pairing code. Run `pccontrol-host pair` on your PC.".into()),
+            None => self.note = Some("That doesn't look like a pairing code.".into()),
         }
     }
     fn connect_local(&mut self, ctx: &egui::Context) {
@@ -352,12 +363,13 @@ impl App {
         };
         let cols = if width >= 900.0 { 4 } else { 2 };
         let wide = if cols == 4 { 2 } else { cols };
-        let rows_disks = (s.disks.len().max(1) as f32) * 46.0 + 56.0;
-        let h2 = rows_disks.max(5.0 * 36.0 + 56.0).max(210.0);
+        let h_disks = (s.disks.len().max(1) as f32) * 50.0 + 96.0;
+        let h_procs = 5.0 * 42.0 + 60.0;
+        let (h_disks, h_procs) = if wide == cols { (h_disks, h_procs) } else { let m = h_disks.max(h_procs); (m, m) };
         let items = [
             (Card::Cpu, 1, 206.0), (Card::Mem, 1, 206.0), (Card::Net, 1, 206.0), (Card::Sys, 1, 206.0),
             (Card::CpuHist, wide, 214.0), (Card::NetHist, wide, 214.0),
-            (Card::Disks, wide, h2), (Card::Procs, wide, h2),
+            (Card::Disks, wide, h_disks), (Card::Procs, wide, h_procs),
             (Card::Cores, cols, 150.0),
         ];
         self.flow(ui, width, cols, &items);
@@ -435,7 +447,11 @@ impl App {
                     split(ui, 22.0, |ui| { ui.label(RichText::new(&d.mount).font(FontId::new(13.5, bold())).color(p.text)); },
                         |ui| { ui.label(RichText::new(format!("{:.0} / {:.0} GiB · {:.0}%", gib(d.used), gib(d.total), f * 100.0)).size(12.5).color(p.muted)); });
                     meter(ui, &p, f, level(f), 8.0);
-                    ui.add_space(4.0);
+                    ui.add_space(8.0);
+                }
+                if s.disks.len() > 1 {
+                    let (u, t) = s.disks.iter().fold((0, 0), |(u, t), d| (u + d.used, t + d.total));
+                    ui.label(RichText::new(format!("{:.0} GiB used of {:.0} GiB in total", gib(u), gib(t))).size(12.0).color(p.faint));
                 }
             }
             Card::Procs => {
@@ -480,22 +496,24 @@ impl App {
         let cols = if width >= 640.0 { 4 } else { 2 };
         let tw = (width - GAP * (cols as f32 - 1.0)) / cols as f32;
         let acts = [
-            (PowerAction::Lock, ic::LOCK, "Lock", false),
-            (PowerAction::Suspend, ic::MOON, "Suspend", false),
-            (PowerAction::Reboot, ic::REFRESH, "Reboot", true),
-            (PowerAction::Shutdown, ic::POWER, "Shut down", true),
+            (PowerAction::Lock, ic::LOCK, "Lock", "Lock the session", false),
+            (PowerAction::Suspend, ic::MOON, "Suspend", "Sleep to RAM", false),
+            (PowerAction::Reboot, ic::REFRESH, "Reboot", "Restart the PC", true),
+            (PowerAction::Shutdown, ic::POWER, "Shut down", "Power off", true),
         ];
         ui.spacing_mut().item_spacing = Vec2::splat(GAP);
         for row in acts.chunks(cols) {
             ui.horizontal(|ui| {
-                for (a, g, label, danger) in row {
+                for (a, g, label, sub, danger) in row {
                     let armed = matches!(self.confirm, Some((c, _)) if c == *a);
                     let (rect, resp) = ui.allocate_exact_size(Vec2::new(tw, 132.0), Sense::click());
-                    let bg = if armed { p.bad } else if resp.hovered() { mix(p.card, p.accent, 0.12) } else { p.card };
+                    let bg = if armed { mix(p.bad, Color32::BLACK, 0.3) } else if resp.hovered() { mix(p.card, p.accent, 0.12) } else { p.card };
                     ui.painter().rect(rect, CornerRadius::same(18), bg, Stroke::new(1.0, if armed { p.bad } else { p.hair }), egui::StrokeKind::Inside);
+                    let _ = sub;
                     let fg = if armed { Color32::WHITE } else { p.text };
-                    ui.painter().text(Pos2::new(rect.center().x, rect.center().y - 18.0), Align2::CENTER_CENTER, if armed { ic::WARNING } else { *g }, FontId::new(34.0, egui::FontFamily::Proportional), if armed { Color32::WHITE } else if *danger { p.warn } else { p.accent });
-                    ui.painter().text(Pos2::new(rect.center().x, rect.center().y + 26.0), Align2::CENTER_CENTER, if armed { "Tap again to confirm".to_string() } else { label.to_string() }, FontId::new(14.5, bold()), fg);
+                    ui.painter().text(Pos2::new(rect.center().x, rect.center().y - 24.0), Align2::CENTER_CENTER, if armed { ic::WARNING } else { *g }, FontId::new(34.0, egui::FontFamily::Proportional), if armed { Color32::WHITE } else if *danger { p.warn } else { p.accent });
+                    ui.painter().text(Pos2::new(rect.center().x, rect.center().y + 18.0), Align2::CENTER_CENTER, if armed { "Tap again to confirm".to_string() } else { label.to_string() }, FontId::new(14.5, bold()), fg);
+                    if !armed { ui.painter().text(Pos2::new(rect.center().x, rect.center().y + 40.0), Align2::CENTER_CENTER, *sub, FontId::new(12.0, egui::FontFamily::Proportional), p.muted); }
                     if resp.clicked() {
                         if *danger && !armed { self.confirm = Some((*a, Instant::now())); } else { self.confirm = None; self.send(ClientMsg::Power(*a)); }
                     }
@@ -508,8 +526,9 @@ impl App {
 
     fn settings_tab(&mut self, ui: &mut egui::Ui, width: f32) {
         let p = self.palette;
-        let ctx = ui.ctx().clone();
-        let host = if let Conn::Up(n) = &self.conn { n.clone() } else { "—".into() };
+        let width = width.min(760.0);
+        let host = if let Conn::Up(n) = &self.conn { n.clone() } else { "–".into() };
+        let addr = self.handle.as_ref().and(Pairing::parse(&self.code).or_else(|| self.local.clone())).map(|p| p.addr);
         card(ui, &p, width, None, |ui| {
             card_title(ui, &p, ic::PLUGS, "Connection");
             let (c, g, t) = match &self.conn {
@@ -519,12 +538,11 @@ impl App {
                 Conn::Idle => (p.faint, ic::PLUGS, "Not connected".to_string()),
             };
             status(ui, &p, c, g, &t);
-            ui.label(RichText::new(format!("Host: {host}")).color(p.muted));
-            if let Some(pr) = self.handle.as_ref().and(Pairing::parse(&self.code).or_else(|| self.local.clone())) {
-                ui.label(RichText::new(format!("Address: {}", pr.addr)).color(p.muted));
-            }
-            ui.add_space(4.0);
-            if pill_button(ui, &p, ic::SIGN_OUT, if self.local.is_some() && Pairing::parse(&self.code).is_none() { "Disconnect" } else { "Forget this PC and pair again" }, false).clicked() {
+            kv(ui, &p, "Host", &host);
+            if let Some(a) = &addr { kv(ui, &p, "Address", a); }
+            ui.add_space(2.0);
+            let local_only = self.local.is_some() && Pairing::parse(&self.code).is_none();
+            if pill_button(ui, &p, ic::SIGN_OUT, if local_only { "Disconnect" } else { "Forget this PC and pair again" }, false).clicked() {
                 self.handle = None; self.conn = Conn::Idle; self.tex = None; self.stats = None; self.hist.clear(); self.code.clear();
                 let _ = std::fs::remove_file(&self.cfg);
                 self.local = None;
@@ -539,20 +557,25 @@ impl App {
             };
             ui.label(RichText::new(src).color(p.muted));
             ui.horizontal(|ui| {
-                for c in [p.page, p.card, p.raised, p.accent, p.series2, p.text] {
-                    let (r, _) = ui.allocate_exact_size(Vec2::splat(26.0), Sense::hover());
-                    ui.painter().rect(r, CornerRadius::same(8), c, Stroke::new(1.0, p.line), egui::StrokeKind::Inside);
+                for (c, name) in [(p.page, "Page"), (p.card, "Card"), (p.raised, "Raised"), (p.accent, "Accent"), (p.series2, "Secondary"), (p.text, "Text")] {
+                    let (r, resp) = ui.allocate_exact_size(Vec2::splat(28.0), Sense::hover());
+                    ui.painter().rect(r, CornerRadius::same(9), c, Stroke::new(1.0, p.line), egui::StrokeKind::Inside);
+                    resp.on_hover_text(name);
                 }
             });
-            if MOBILE && ui.checkbox(&mut self.settings.sync_theme, "Match my PC's theme").changed() { self.settings.save(&self.cfg_settings); }
+            if MOBILE && toggle_row(ui, &p, "Match my PC's theme", &mut self.settings.sync_theme) { self.settings.save(&self.cfg_settings); }
         });
         if MOBILE {
             card(ui, &p, width, None, |ui| {
                 card_title(ui, &p, ic::MONITOR, "Screen stream");
                 let mut changed = false;
-                changed |= ui.add(egui::Slider::new(&mut self.settings.quality, 20..=90).text("JPEG quality")).changed();
-                changed |= ui.add(egui::Slider::new(&mut self.settings.max_width, 640..=1920).text("Max width")).changed();
-                changed |= ui.add(egui::Slider::new(&mut self.settings.fps, 5..=60).text("FPS")).changed();
+                let mut q = self.settings.quality as f32;
+                if slider_row(ui, &p, "Image quality", &format!("{}%", self.settings.quality), &mut q, 20.0, 90.0) { self.settings.quality = q.round() as u8; changed = true; }
+                let mut w = self.settings.max_width as f32;
+                if slider_row(ui, &p, "Maximum width", &format!("{} px", self.settings.max_width), &mut w, 640.0, 1920.0) { self.settings.max_width = ((w / 40.0).round() * 40.0) as u32; changed = true; }
+                let mut f = self.settings.fps as f32;
+                if slider_row(ui, &p, "Frame rate", &format!("{} fps", self.settings.fps), &mut f, 5.0, 60.0) { self.settings.fps = f.round() as u8; changed = true; }
+                ui.label(RichText::new("Lower quality and width save battery and data.").size(12.0).color(p.faint));
                 if changed { self.settings.save(&self.cfg_settings); }
             });
         }
@@ -560,7 +583,7 @@ impl App {
             card_title(ui, &p, ic::SHIELD, "Security");
             ui.label(RichText::new("Traffic is encrypted with TLS and pinned to your PC's certificate. Keep port 7878 off the public internet; use Tailscale or WireGuard when you're away.").size(13.0).color(p.muted));
         });
-        let _ = ctx;
+        ui.label(RichText::new(format!("PC Control {}", env!("CARGO_PKG_VERSION"))).size(12.0).color(p.faint));
     }
 
     // ───────────────────────────── shell ─────────────────────────────
@@ -576,7 +599,7 @@ impl App {
                 ui.vertical(|ui| {
                     ui.set_width(w);
                     ui.add_space(if MOBILE { 40.0 } else { 90.0 });
-                    ui.vertical_centered(|ui| { logo(ui, &p, 72.0); });
+                    ui.vertical_centered(|ui| { self.logo_img(ui, 84.0); });
                     ui.add_space(8.0);
                     ui.vertical_centered(|ui| {
                         ui.label(heading("PC Control", 28.0, p.text));
@@ -593,8 +616,13 @@ impl App {
                             ui.add_space(8.0);
                         }
                         card_title(ui, &p, ic::PHONE, "Pair with a pairing code");
-                        ui.label(RichText::new("On the PC run `pccontrol-host pair`, then paste the code here.").size(13.0).color(p.muted));
-                        let r = ui.add(egui::TextEdit::singleline(&mut self.code).hint_text("192.168.1.5:7878#token#fingerprint").desired_width(f32::INFINITY).margin(Vec2::new(12.0, 12.0)));
+                        ui.horizontal_wrapped(|ui| {
+                            ui.spacing_mut().item_spacing.x = 4.0;
+                            ui.label(RichText::new("On the PC run").size(13.0).color(p.muted));
+                            ui.label(code("pccontrol-host pair", &p));
+                            ui.label(RichText::new("and paste the code here.").size(13.0).color(p.muted));
+                        });
+                        let r = ui.add(egui::TextEdit::singleline(&mut self.code).hint_text(RichText::new("192.168.1.5:7878#token#fingerprint").color(p.faint)).desired_width(f32::INFINITY).margin(Vec2::new(12.0, 12.0)));
                         #[cfg(target_os = "android")]
                         {
                             if r.gained_focus() { if let Some(a) = crate::ANDROID_APP.get() { a.show_soft_input(false); } }
@@ -616,27 +644,29 @@ impl App {
     fn status_pill(&self, ui: &mut egui::Ui) {
         let p = self.palette;
         match &self.conn {
-            Conn::Up(n) => chip(ui, &p, ic::CHECK, &format!("Connected · {n}"), p.ok),
+            Conn::Up(n) => chip(ui, &p, ic::CHECK, &if self.compact { "Connected".to_string() } else { format!("Connected · {n}") }, p.ok),
             Conn::Connecting => chip(ui, &p, ic::REFRESH, "Connecting…", p.warn),
-            Conn::Down(m) => chip(ui, &p, ic::WARNING, &format!("Offline · {m}"), p.bad),
+            Conn::Down(m) => chip(ui, &p, ic::WARNING, &if self.compact { "Offline".to_string() } else { format!("Offline · {m}") }, p.bad),
             Conn::Idle => chip(ui, &p, ic::PLUGS, "Not connected", p.faint),
         }
     }
 
     fn page(&mut self, ui: &mut egui::Ui) {
         let p = self.palette;
-        let pad = if MOBILE { 12.0 } else { 28.0 };
+        let pad = if self.compact { 12.0 } else { 28.0 };
         let avail = ui.available_width();
         let w = (avail - 2.0 * pad).min(1100.0);
         let off = (avail - w) / 2.0;
         let title = match self.tab { Tab::Dashboard => "Dashboard", Tab::Power => "Power", Tab::Settings => "Settings", Tab::Screen => "" };
-        egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
+        let mut sa = egui::ScrollArea::vertical().auto_shrink([false, false]);
+        if let Some(o) = self.dev_scroll { sa = sa.vertical_scroll_offset(o); }
+        sa.show(ui, |ui| {
             ui.add_space(pad);
             ui.horizontal_top(|ui| {
                 ui.add_space(off);
                 ui.vertical(|ui| {
                     ui.set_width(w);
-                    split(ui, 44.0, |ui| { ui.label(heading(title, if MOBILE { 24.0 } else { 28.0 }, p.text)); }, |ui| self.status_pill(ui));
+                    split(ui, 44.0, |ui| { ui.label(heading(title, if self.compact { 24.0 } else { 28.0 }, p.text)); }, |ui| self.status_pill(ui));
                     ui.add_space(4.0);
                     match self.tab {
                         Tab::Dashboard => self.dashboard(ui, w),
@@ -648,6 +678,10 @@ impl App {
                 });
             });
         });
+    }
+
+    fn logo_img(&self, ui: &mut egui::Ui, size: f32) {
+        ui.add(egui::Image::new((self.logo.id(), Vec2::splat(size))));
     }
 
     fn nav_items(&self) -> Vec<(Tab, &'static str, &'static str)> {
@@ -662,7 +696,7 @@ impl App {
         ui.add_space(18.0);
         ui.horizontal(|ui| {
             ui.add_space(14.0);
-            logo(ui, &p, 38.0);
+            self.logo_img(ui, 40.0);
             ui.vertical(|ui| {
                 ui.spacing_mut().item_spacing.y = 0.0;
                 ui.label(heading("PC Control", 16.0, p.text));
@@ -702,10 +736,13 @@ impl App {
     }
 }
 
-pub fn logo(ui: &mut egui::Ui, p: &Palette, size: f32) {
-    let (rect, _) = ui.allocate_exact_size(Vec2::splat(size), Sense::hover());
-    ui.painter().rect_filled(rect, CornerRadius::same((size * 0.28) as u8), p.tint);
-    ui.painter().text(rect.center(), Align2::CENTER_CENTER, ic::MONITOR, FontId::new(size * 0.55, egui::FontFamily::Proportional), p.accent);
+fn kv(ui: &mut egui::Ui, p: &Palette, k: &str, v: &str) {
+    split(ui, 24.0, |ui| { ui.label(RichText::new(k).size(13.0).color(p.muted)); }, |ui| { ui.label(RichText::new(v).font(FontId::new(13.5, bold())).color(p.text)); });
+}
+
+fn logo_image() -> egui::ColorImage {
+    let img = image::load_from_memory(include_bytes!("../../packaging/icon-512.png")).map(|i| i.to_rgba8()).unwrap_or_else(|_| image::RgbaImage::new(1, 1));
+    egui::ColorImage::from_rgba_unmultiplied([img.width() as usize, img.height() as usize], img.as_raw())
 }
 
 #[cfg(target_os = "android")]
@@ -737,7 +774,9 @@ impl eframe::App for App {
             return;
         }
         self.sync_stream();
-        if MOBILE {
+        self.compact = MOBILE || ui.available_width() < 720.0;
+        if !MOBILE && self.tab == Tab::Screen { self.tab = Tab::Dashboard; }
+        if self.compact {
             egui::Panel::bottom("nav").frame(egui::Frame::new().fill(p.bar).inner_margin(egui::Margin { left: 0, right: 0, top: 4, bottom: 10 })).show(ui, |ui| self.bottom_nav(ui));
             if self.tab == Tab::Screen {
                 egui::Panel::bottom("keys").frame(egui::Frame::new().fill(p.page).inner_margin(egui::Margin::symmetric(10, 8))).show(ui, |ui| self.key_bar(ui));
@@ -748,6 +787,15 @@ impl eframe::App for App {
         egui::CentralPanel::default().frame(egui::Frame::new().fill(p.page)).show(ui, |ui| {
             if self.tab == Tab::Screen && MOBILE {
                 self.screen(ui);
+                let portrait = ui.max_rect().height() > ui.max_rect().width();
+                if !matches!(self.conn, Conn::Up(_)) {
+                    egui::Area::new(ui.id().with("offline")).anchor(Align2::LEFT_TOP, Vec2::new(12.0, 12.0)).show(ui.ctx(), |ui| self.status_pill(ui));
+                }
+                if self.rotate_hint && portrait && self.tex.is_some() {
+                    egui::Area::new(ui.id().with("rotate")).pivot(Align2::CENTER_BOTTOM).fixed_pos(Pos2::new(ui.max_rect().center().x, ui.max_rect().max.y - 12.0)).show(ui.ctx(), |ui| {
+                        if pill_button(ui, &p, ic::PHONE, "Rotate your phone for a bigger view", false).clicked() { self.rotate_hint = false; }
+                    });
+                }
                 if let Some(n) = self.note.clone() {
                     egui::Area::new(ui.id().with("note")).anchor(Align2::CENTER_TOP, Vec2::new(0.0, 12.0)).show(ui.ctx(), |ui| {
                         if pill_button(ui, &p, ic::WARNING, &n, false).clicked() { self.note = None; }

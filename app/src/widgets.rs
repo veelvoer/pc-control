@@ -108,6 +108,10 @@ pub fn chart(ui: &mut Ui, p: &Palette, id: &str, series: &[Series], window: usiz
         let y = plot.max.y - plot.height() * i as f32 / 2.0;
         paint.line_segment([Pos2::new(plot.min.x, y), Pos2::new(plot.max.x, y)], Stroke::new(1.0, p.hair));
     }
+    paint.text(Pos2::new(plot.min.x + 2.0, plot.min.y + 8.0), Align2::LEFT_CENTER, fmt(max), FontId::new(10.5, egui::FontFamily::Proportional), p.faint);
+    if series.iter().all(|s| s.data.len() < 2) {
+        paint.text(plot.center(), Align2::CENTER_CENTER, "Collecting data…", FontId::new(12.5, egui::FontFamily::Proportional), p.faint);
+    }
     let dx = plot.width() / (window.saturating_sub(1)).max(1) as f32;
     let xy = |n: usize, i: usize, v: f32| Pos2::new(plot.max.x - (n - 1 - i) as f32 * dx, plot.max.y - plot.height() * (v / max.max(1e-6)).clamp(0.0, 1.0));
     for (si, s) in series.iter().enumerate() {
@@ -197,4 +201,43 @@ pub fn status(ui: &mut Ui, p: &Palette, color: Color32, glyph: &str, text: &str)
         ui.label(icon(glyph, 14.0, color));
         ui.label(RichText::new(text).font(FontId::new(13.0, bold())).color(p.text));
     });
+}
+
+/// Label on the left, switch on the right.
+pub fn toggle_row(ui: &mut Ui, p: &Palette, label: &str, value: &mut bool) -> bool {
+    let (rect, resp) = ui.allocate_exact_size(Vec2::new(ui.available_width(), 40.0), Sense::click());
+    let mut changed = false;
+    if resp.clicked() { *value = !*value; changed = true; }
+    ui.painter().text(Pos2::new(rect.min.x, rect.center().y), Align2::LEFT_CENTER, label, FontId::new(14.0, egui::FontFamily::Proportional), p.text);
+    let sw = Rect::from_center_size(Pos2::new(rect.max.x - 25.0, rect.center().y), Vec2::new(50.0, 28.0));
+    ui.painter().rect_filled(sw, CornerRadius::same(99), if *value { p.accent } else { p.line });
+    let knob_x = if *value { sw.max.x - 14.0 } else { sw.min.x + 14.0 };
+    ui.painter().circle_filled(Pos2::new(knob_x, sw.center().y), 10.0, if *value { p.on_accent } else { p.card });
+    changed
+}
+
+/// Label + value on one line, thin slider underneath. Returns true when changed.
+pub fn slider_row(ui: &mut Ui, p: &Palette, label: &str, value_text: &str, v: &mut f32, min: f32, max: f32) -> bool {
+    let (rect, resp) = ui.allocate_exact_size(Vec2::new(ui.available_width(), 52.0), Sense::click_and_drag());
+    ui.painter().text(Pos2::new(rect.min.x, rect.min.y + 10.0), Align2::LEFT_CENTER, label, FontId::new(14.0, egui::FontFamily::Proportional), p.text);
+    ui.painter().text(Pos2::new(rect.max.x, rect.min.y + 10.0), Align2::RIGHT_CENTER, value_text, FontId::new(13.5, bold()), p.muted);
+    let track = Rect::from_min_max(Pos2::new(rect.min.x + 10.0, rect.min.y + 34.0), Pos2::new(rect.max.x - 10.0, rect.min.y + 40.0));
+    let mut changed = false;
+    if let (true, Some(pos)) = (resp.dragged() || resp.clicked(), resp.interact_pointer_pos()) {
+        let t = ((pos.x - track.min.x) / track.width()).clamp(0.0, 1.0);
+        let nv = min + t * (max - min);
+        if (nv - *v).abs() > f32::EPSILON { *v = nv; changed = true; }
+    }
+    let t = ((*v - min) / (max - min)).clamp(0.0, 1.0);
+    let x = track.min.x + track.width() * t;
+    ui.painter().rect_filled(track, CornerRadius::same(3), p.line);
+    ui.painter().rect_filled(Rect::from_min_max(track.min, Pos2::new(x, track.max.y)), CornerRadius::same(3), p.accent);
+    ui.painter().circle_filled(Pos2::new(x, track.center().y), if resp.dragged() { 11.0 } else { 9.0 }, p.accent);
+    ui.painter().circle_filled(Pos2::new(x, track.center().y), 4.0, p.on_accent);
+    changed
+}
+
+/// Monospace inline code chip, used in help text.
+pub fn code(text: &str, p: &Palette) -> RichText {
+    RichText::new(text).font(FontId::new(13.0, egui::FontFamily::Monospace)).color(p.text).background_color(p.raised)
 }

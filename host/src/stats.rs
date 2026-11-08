@@ -25,10 +25,16 @@ impl Sampler {
         self.tick += 1;
         if self.tick % 2 == 1 {
             self.sys.refresh_processes(ProcessesToUpdate::All, true);
-            let mut v: Vec<Proc> = self.sys.processes().values()
-                .map(|p| Proc { name: p.name().to_string_lossy().into_owned(), cpu: p.cpu_usage(), mem: p.memory() })
-                .collect();
-            v.sort_by(|a, b| b.cpu.total_cmp(&a.cpu));
+            // Group by name (browsers, helpers…) and express CPU as a share of the whole machine.
+            let cores = self.sys.cpus().len().max(1) as f32;
+            let mut by_name: std::collections::HashMap<String, (f32, u64)> = std::collections::HashMap::new();
+            for p in self.sys.processes().values() {
+                let e = by_name.entry(p.name().to_string_lossy().into_owned()).or_default();
+                e.0 += p.cpu_usage() / cores;
+                e.1 += p.memory();
+            }
+            let mut v: Vec<Proc> = by_name.into_iter().map(|(name, (cpu, mem))| Proc { name, cpu, mem }).collect();
+            v.sort_by(|a, b| b.cpu.total_cmp(&a.cpu).then(b.mem.cmp(&a.mem)));
             v.truncate(5);
             self.top = v;
         }
