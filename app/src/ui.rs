@@ -135,10 +135,15 @@ impl App {
             Ok("screen") => app.tab = Tab::Screen,
             _ => {}
         }
-        if app.settings.notes_seen != update::CURRENT {
-            if !app.settings.notes_seen.is_empty() { app.changes = Some(Some(app.settings.notes_seen.clone())); }
-            app.settings.notes_seen = update::CURRENT.to_string();
-            app.settings.save(&app.cfg_settings);
+        if app.settings.notes_seen != update::CURRENT && std::env::var_os("PCC_CHANGES").is_none() {
+            let seen = app.settings.notes_seen.clone();
+            if !seen.is_empty() && update::NOTES.iter().any(|(v, _)| update::newer(v, &seen) && !update::newer(v, update::CURRENT)) {
+                app.changes = Some(Some(seen.clone()));
+            }
+            if seen.is_empty() || update::newer(update::CURRENT, &seen) {
+                app.settings.notes_seen = update::CURRENT.to_string();
+                app.settings.save(&app.cfg_settings);
+            }
         }
         if std::env::var_os("PCC_CHANGES").is_some() { app.changes = Some(None); }
         app.check_updates(ctx);
@@ -592,6 +597,7 @@ impl App {
             card_title(ui, &p, ic::UPDATE, "Updates");
             split(ui, 30.0, |ui| { ui.label(RichText::new(format!("PC Control {}", update::CURRENT)).font(FontId::new(15.0, bold())).color(p.text)); }, |ui| {
                 if self.upd.busy { chip(ui, &p, ic::SYNC, "Updating…", p.warn); }
+                else if self.upd.done.is_some() { chip(ui, &p, ic::CHECK, "Installed", p.ok); }
                 else if let Some(r) = &avail { chip(ui, &p, ic::UPDATE, &format!("Version {} is ready", r.version), p.accent); }
                 else if self.upd.checking { chip(ui, &p, ic::SYNC, "Checking…", p.faint); }
                 else if self.upd.error.is_some() && self.upd.checked.is_none() { chip(ui, &p, ic::WARNING, "Could not check", p.bad); }
@@ -619,7 +625,7 @@ impl App {
             ui.add_space(2.0);
             ui.horizontal_wrapped(|ui| {
                 ui.spacing_mut().item_spacing = Vec2::new(8.0, 8.0);
-                if let (Some(r), false) = (&avail, self.upd.busy) {
+                if let (Some(r), false) = (&avail, self.upd.busy || self.upd.done.is_some()) {
                     if pill_button(ui, &p, ic::DOWNLOAD, &format!("Update to {}", r.version), true).clicked() { do_update = true; }
                 }
                 if self.upd.done.is_some() && !MOBILE && pill_button(ui, &p, ic::SYNC, "Restart now", true).clicked() { restart = true; }
@@ -792,12 +798,12 @@ impl App {
                                     badge(ui, &p, ic::UPDATE, 36.0, p.accent, true);
                                     ui.vertical(|ui| {
                                         ui.spacing_mut().item_spacing.y = 0.0;
-                                        ui.label(RichText::new(format!("Version {} is ready", r.version)).font(FontId::new(14.5, bold())).color(p.text));
-                                        ui.label(RichText::new(format!("You have {}", update::CURRENT)).size(12.0).color(p.muted));
+                                        ui.label(RichText::new(if self.compact { "Update ready".to_string() } else { format!("Version {} is ready", r.version) }).font(FontId::new(14.5, bold())).color(p.text));
+                                        ui.label(RichText::new(if self.compact { format!("{} · you have {}", r.version, update::CURRENT) } else { format!("You have {}", update::CURRENT) }).size(12.0).color(p.muted));
                                     });
                                 }, |ui| {
                                     if pill_button(ui, &p, ic::DOWNLOAD, "Update", true).clicked() { go = true; }
-                                    if pill_button(ui, &p, "", "Details", false).clicked() { details = true; }
+                                    if !self.compact && pill_button(ui, &p, "", "Details", false).clicked() { details = true; }
                                 });
                             });
                             if go { self.tab = Tab::Settings; self.start_update(&ui.ctx().clone()); }

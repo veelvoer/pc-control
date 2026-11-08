@@ -13,6 +13,7 @@ pub const NOTES: &[(&str, &str)] = &[
     ("0.2.0", include_str!("../release-notes/0.2.0.md")),
     ("0.3.0", include_str!("../release-notes/0.3.0.md")),
     ("0.4.0", include_str!("../release-notes/0.4.0.md")),
+    ("0.4.1", include_str!("../release-notes/0.4.1.md")),
 ];
 
 #[derive(Clone, Debug)]
