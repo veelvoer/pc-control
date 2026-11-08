@@ -4,6 +4,7 @@ mod keys;
 mod net;
 mod theme;
 mod ui;
+mod update;
 mod widgets;
 
 use std::path::PathBuf;

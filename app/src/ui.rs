@@ -1,4 +1,4 @@
-use crate::{icons as ic, keys, net, theme::{self, bold, mix, Palette, MOBILE}, widgets::*};
+use crate::{icons as ic, keys, net, update, theme::{self, bold, ifont, mix, Palette, MOBILE}, widgets::*};
 use eframe::egui::{self, Align2, Color32, CornerRadius, Event, FontId, Pos2, Rect, RichText, Sense, Stroke, Vec2};
 use proto::{Button, ClientMsg, Input, Pairing, PowerAction, Stats, ThemeColors};
 use sha2::{Digest, Sha256};
@@ -20,22 +20,34 @@ enum Card { Cpu, Mem, Net, Sys, CpuHist, NetHist, Disks, Procs, Cores }
 const HIST: usize = 120;
 const GAP: f32 = 14.0;
 
-struct Settings { quality: u8, max_width: u32, fps: u8, sync_theme: bool }
+struct Settings { quality: u8, max_width: u32, fps: u8, sync_theme: bool, notes_seen: String }
 
 impl Settings {
     fn load(path: &PathBuf) -> Self {
-        let mut s = Self { quality: 60, max_width: 1280, fps: 30, sync_theme: true };
+        let mut s = Self { quality: 60, max_width: 1280, fps: 30, sync_theme: true, notes_seen: String::new() };
         for l in std::fs::read_to_string(path).unwrap_or_default().lines() {
             if let Some((k, v)) = l.split_once('=') {
                 match k { "quality" => s.quality = v.parse().unwrap_or(s.quality), "max_width" => s.max_width = v.parse().unwrap_or(s.max_width),
-                    "fps" => s.fps = v.parse().unwrap_or(s.fps), "sync_theme" => s.sync_theme = v != "0", _ => {} }
+                    "fps" => s.fps = v.parse().unwrap_or(s.fps), "sync_theme" => s.sync_theme = v != "0", "notes_seen" => s.notes_seen = v.to_string(), _ => {} }
             }
         }
         s
     }
     fn save(&self, path: &PathBuf) {
-        let _ = std::fs::write(path, format!("quality={}\nmax_width={}\nfps={}\nsync_theme={}\n", self.quality, self.max_width, self.fps, self.sync_theme as u8));
+        let _ = std::fs::write(path, format!("quality={}\nmax_width={}\nfps={}\nsync_theme={}\nnotes_seen={}\n", self.quality, self.max_width, self.fps, self.sync_theme as u8, self.notes_seen));
     }
+}
+
+struct Upd {
+    latest: Option<update::Release>,
+    checking: bool,
+    checked: Option<Instant>,
+    error: Option<String>,
+    progress: Option<f32>,
+    busy: bool,
+    done: Option<String>,
+    tx: mpsc::Sender<update::Msg>,
+    rx: mpsc::Receiver<update::Msg>,
 }
 
 pub struct App {
@@ -69,6 +81,9 @@ pub struct App {
     logo: egui::TextureHandle,
     compact: bool,
     rotate_hint: bool,
+    upd: Upd,
+    host_version: Option<String>,
+    changes: Option<Option<String>>, // Some(None) = all notes, Some(Some(v)) = notes newer than v
     dev_scroll: Option<f32>,
 }
 
@@ -108,7 +123,8 @@ impl App {
             tab: if MOBILE { Tab::Screen } else { Tab::Dashboard }, palette, host_theme: None, local_theme: None, theme_rx, settings, local,
             touch_seen: false, drag_mode: false, right_next: false, kb_open: false, sticky: [false; 4], phys: [false; 3],
             scroll_acc: 0.0, last_move: None, stream_sent: None, confirm: None,
-            compact: MOBILE, rotate_hint: true,
+            compact: MOBILE, rotate_hint: true, upd: { let (tx, rx) = mpsc::channel(); Upd { latest: None, checking: false, checked: None, error: None, progress: None, busy: false, done: None, tx, rx } },
+            host_version: None, changes: None,
             logo: ctx.load_texture("logo", logo_image(), egui::TextureOptions::LINEAR),
             dev_scroll: std::env::var("PCC_SCROLL").ok().and_then(|v| v.parse().ok()), // dev aid for screenshots
         };
@@ -119,6 +135,13 @@ impl App {
             Ok("screen") => app.tab = Tab::Screen,
             _ => {}
         }
+        if app.settings.notes_seen != update::CURRENT {
+            if !app.settings.notes_seen.is_empty() { app.changes = Some(Some(app.settings.notes_seen.clone())); }
+            app.settings.notes_seen = update::CURRENT.to_string();
+            app.settings.save(&app.cfg_settings);
+        }
+        if std::env::var_os("PCC_CHANGES").is_some() { app.changes = Some(None); }
+        app.check_updates(ctx);
         if std::env::var_os("PCC_ONBOARD").is_some() { return app; } // dev aid: show the pairing screen
         if std::env::var_os("PCC_CONFIRM").is_some() { app.confirm = Some((PowerAction::Reboot, Instant::now() + Duration::from_secs(3600))); }
         if Pairing::parse(&app.code).is_some() { app.connect(ctx); } else if app.local.is_some() { app.connect_local(ctx); }
@@ -146,7 +169,51 @@ impl App {
     fn key(&self, code: u16, down: bool) { self.input(Input::Key { code, down }); }
     fn tap_key(&self, code: u16) { self.key(code, true); self.key(code, false); }
 
+    fn check_updates(&mut self, ctx: &egui::Context) {
+        if let Ok(v) = std::env::var("PCC_FAKE_UPDATE") { // dev aid for screenshots
+            self.upd.latest = Some(update::Release { version: v, notes: "## Highlights\n- Faster dashboard\n- New power tiles\n- **Fixes** for reconnecting".into(), assets: vec![] });
+            self.upd.checked = Some(Instant::now());
+            return;
+        }
+        if self.upd.checking || std::env::var_os("PCC_NOUPDATE").is_some() { return; }
+        self.upd.checking = true;
+        update::check(self.upd.tx.clone(), ctx.clone());
+    }
+
+    fn update_available(&self) -> Option<&update::Release> {
+        self.upd.latest.as_ref().filter(|r| update::newer(&r.version, update::CURRENT))
+    }
+
+    fn pump_updates(&mut self, ctx: &egui::Context) {
+        while let Ok(m) = self.upd.rx.try_recv() {
+            match m {
+                update::Msg::Checked(r) => {
+                    self.upd.checking = false;
+                    self.upd.checked = Some(Instant::now());
+                    match r { Ok(r) => { self.upd.latest = Some(r); self.upd.error = None; } Err(e) => self.upd.error = Some(e) }
+                    if std::env::var_os("PCC_AUTOUPDATE").is_some() && self.update_available().is_some() { self.start_update(ctx); } // dev aid: end-to-end test
+                }
+                update::Msg::Progress(p) => self.upd.progress = Some(p),
+                update::Msg::Done(m) => { self.upd.busy = false; self.upd.progress = None; self.upd.done = Some(m); }
+                update::Msg::Failed(e) => { self.upd.busy = false; self.upd.progress = None; self.upd.error = Some(e); }
+            }
+        }
+        // Look again every 6 hours while the app stays open.
+        if self.upd.checked.map_or(false, |t| t.elapsed() > Duration::from_secs(6 * 3600)) { self.check_updates(ctx); }
+    }
+
+    fn start_update(&mut self, ctx: &egui::Context) {
+        if let Some(r) = self.update_available().cloned() {
+            self.upd.busy = true;
+            self.upd.error = None;
+            self.upd.done = None;
+            self.upd.progress = Some(0.0);
+            update::apply(r, self.upd.tx.clone(), ctx.clone());
+        }
+    }
+
     fn pump(&mut self, ctx: &egui::Context) {
+        self.pump_updates(ctx);
         if let Some(rx) = &self.theme_rx { while let Ok(t) = rx.try_recv() { self.local_theme = t; } }
         let mut drop_handle = false;
         if let Some(h) = &self.handle {
@@ -165,6 +232,7 @@ impl App {
                         self.stats = Some(s);
                     }
                     net::Event::Theme(t) => self.host_theme = Some(t),
+                    net::Event::HostVersion(v) => self.host_version = Some(v),
                     net::Event::Lost(m) => self.conn = Conn::Down(m),
                     net::Event::HostError(m) => self.note = Some(m),
                     net::Event::Fatal(m) => { self.conn = Conn::Down(m); drop_handle = true; }
@@ -382,44 +450,32 @@ impl App {
         let level = |f: f32| if f > 0.92 { p.bad } else if f > 0.8 { p.warn } else { p.accent };
         let rate = |b: f32| if b >= 1048576.0 { format!("{:.1} MB/s", b / 1048576.0) } else { format!("{:.0} KB/s", b / 1024.0) };
         card(ui, &p, w, Some(h), |ui| match kind {
-            Card::Cpu => {
-                card_title(ui, &p, ic::CPU, "CPU");
-                let f = s.cpu / 100.0;
-                ui.vertical_centered(|ui| ring(ui, &p, f, 112.0, level(f), &format!("{:.0}%", s.cpu), &format!("{} cores", s.cpu_cores.len())));
-            }
-            Card::Mem => {
-                card_title(ui, &p, ic::MEMORY, "Memory");
-                let f = s.mem_used as f32 / s.mem_total.max(1) as f32;
-                ui.vertical_centered(|ui| ring(ui, &p, f, 112.0, level(f), &format!("{:.0}%", f * 100.0), &format!("{:.1}/{:.0} GiB", gib(s.mem_used), gib(s.mem_total))));
+            Card::Cpu | Card::Mem => {
+                let (glyph, title, f, big, small) = if let Card::Cpu = kind {
+                    (ic::CPU, "CPU", s.cpu / 100.0, format!("{:.0}%", s.cpu), format!("{} cores", s.cpu_cores.len()))
+                } else {
+                    let f = s.mem_used as f32 / s.mem_total.max(1) as f32;
+                    (ic::MEMORY, "Memory", f, format!("{:.0}%", f * 100.0), format!("{:.1} / {:.0} GiB", gib(s.mem_used), gib(s.mem_total)))
+                };
+                card_title(ui, &p, glyph, title);
+                let size = (w - 56.0).clamp(96.0, 124.0);
+                ui.add_space(((ui.available_height() - size) / 2.0).max(0.0));
+                ui.vertical_centered(|ui| ring(ui, &p, f, size, level(f), &big, &small));
             }
             Card::Net => {
                 card_title(ui, &p, ic::WIFI, "Network");
-                ui.add_space(6.0);
-                for (g, col, label, v) in [(ic::DOWN, p.accent, "Download", s.net_rx_bps as f32), (ic::UP, p.series2, "Upload", s.net_tx_bps as f32)] {
-                    ui.horizontal(|ui| {
-                        ui.label(icon(g, 22.0, col));
-                        ui.vertical(|ui| {
-                            ui.spacing_mut().item_spacing.y = 0.0;
-                            ui.label(RichText::new(rate(v)).font(FontId::new(19.0, bold())).color(p.text));
-                            ui.label(RichText::new(label).size(12.0).color(p.muted));
-                        });
-                    });
-                    ui.add_space(4.0);
-                }
+                ui.add_space(((ui.available_height() - 2.0 * 44.0 - 10.0) / 2.0).max(0.0));
+                metric_row(ui, &p, ic::DOWN, p.accent, &rate(s.net_rx_bps as f32), "Download");
+                ui.add_space(2.0);
+                metric_row(ui, &p, ic::UP, p.series2, &rate(s.net_tx_bps as f32), "Upload");
             }
             Card::Sys => {
                 card_title(ui, &p, ic::GAUGE, "System");
-                ui.add_space(4.0);
                 let up = s.uptime_s;
-                let rows = [
-                    (ic::THERMO, "Temp", s.temp_c.map_or("n/a".to_string(), |t| format!("{t:.0} °C"))),
-                    (ic::CLOCK, "Uptime", if up >= 86400 { format!("{}d {}h", up / 86400, up / 3600 % 24) } else { format!("{}h {}m", up / 3600, up / 60 % 60) }),
-                    (ic::GAUGE, "Load", format!("{:.2}", s.load[0])),
-                ];
-                for (g, k, v) in rows {
-                    split(ui, 26.0, |ui| { ui.label(icon(g, 16.0, p.muted)); ui.label(RichText::new(k).color(p.muted).size(13.0)); },
-                        |ui| { ui.label(RichText::new(v).font(FontId::new(14.5, bold())).color(p.text)); });
-                }
+                ui.add_space(((ui.available_height() - 3.0 * 34.0 - 16.0) / 2.0).max(0.0));
+                info_row(ui, &p, ic::THERMO, "Temp", &s.temp_c.map_or("n/a".to_string(), |t| format!("{t:.0} °C")));
+                info_row(ui, &p, ic::CLOCK, "Uptime", &if up >= 86400 { format!("{}d {}h", up / 86400, up / 3600 % 24) } else { format!("{}h {}m", up / 3600, up / 60 % 60) });
+                info_row(ui, &p, ic::GAUGE, "Load", &format!("{:.2}", s.load[0]));
             }
             Card::CpuHist => {
                 card_title(ui, &p, ic::CHART, "CPU, last 2 minutes");
@@ -511,9 +567,12 @@ impl App {
                     ui.painter().rect(rect, CornerRadius::same(18), bg, Stroke::new(1.0, if armed { p.bad } else { p.hair }), egui::StrokeKind::Inside);
                     let _ = sub;
                     let fg = if armed { Color32::WHITE } else { p.text };
-                    ui.painter().text(Pos2::new(rect.center().x, rect.center().y - 24.0), Align2::CENTER_CENTER, if armed { ic::WARNING } else { *g }, FontId::new(34.0, egui::FontFamily::Proportional), if armed { Color32::WHITE } else if *danger { p.warn } else { p.accent });
-                    ui.painter().text(Pos2::new(rect.center().x, rect.center().y + 18.0), Align2::CENTER_CENTER, if armed { "Tap again to confirm".to_string() } else { label.to_string() }, FontId::new(14.5, bold()), fg);
-                    if !armed { ui.painter().text(Pos2::new(rect.center().x, rect.center().y + 40.0), Align2::CENTER_CENTER, *sub, FontId::new(12.0, egui::FontFamily::Proportional), p.muted); }
+                    let tint = if armed { Color32::WHITE } else if *danger { p.warn } else { p.accent };
+                    let br = Rect::from_center_size(Pos2::new(rect.center().x, rect.center().y - 22.0), Vec2::splat(52.0));
+                    ui.painter().circle_filled(br.center(), 26.0, if armed { Color32::from_white_alpha(36) } else { mix(p.card, tint, 0.17) });
+                    ui.painter().text(br.center(), Align2::CENTER_CENTER, if armed { ic::WARNING } else { *g }, ifont(26.0, 2), tint);
+                    ui.painter().text(Pos2::new(rect.center().x, rect.center().y + 22.0), Align2::CENTER_CENTER, if armed { "Tap again to confirm".to_string() } else { label.to_string() }, FontId::new(14.5, bold()), fg);
+                    if !armed { ui.painter().text(Pos2::new(rect.center().x, rect.center().y + 44.0), Align2::CENTER_CENTER, *sub, FontId::new(12.0, egui::FontFamily::Proportional), p.muted); }
                     if resp.clicked() {
                         if *danger && !armed { self.confirm = Some((*a, Instant::now())); } else { self.confirm = None; self.send(ClientMsg::Power(*a)); }
                     }
@@ -522,6 +581,62 @@ impl App {
         }
         ui.add_space(4.0);
         ui.label(RichText::new("Actions run on your PC immediately. Reboot and shut down need a second tap.").size(12.5).color(p.faint));
+    }
+
+    fn updates_card(&mut self, ui: &mut egui::Ui, width: f32) {
+        let p = self.palette;
+        let ctx = ui.ctx().clone();
+        let avail = self.update_available().cloned();
+        let (mut do_update, mut do_check, mut show, mut restart) = (false, false, false, false);
+        card(ui, &p, width, None, |ui| {
+            card_title(ui, &p, ic::UPDATE, "Updates");
+            split(ui, 30.0, |ui| { ui.label(RichText::new(format!("PC Control {}", update::CURRENT)).font(FontId::new(15.0, bold())).color(p.text)); }, |ui| {
+                if self.upd.busy { chip(ui, &p, ic::SYNC, "Updating…", p.warn); }
+                else if let Some(r) = &avail { chip(ui, &p, ic::UPDATE, &format!("Version {} is ready", r.version), p.accent); }
+                else if self.upd.checking { chip(ui, &p, ic::SYNC, "Checking…", p.faint); }
+                else if self.upd.error.is_some() && self.upd.checked.is_none() { chip(ui, &p, ic::WARNING, "Could not check", p.bad); }
+                else if self.upd.checked.is_some() { chip(ui, &p, ic::CHECK, "Up to date", p.ok); }
+            });
+            if let Some(r) = &avail {
+                let lines = update::plain(&r.notes);
+                if !lines.is_empty() {
+                    ui.add_space(2.0);
+                    ui.label(RichText::new("What is new").font(FontId::new(12.5, bold())).color(p.muted));
+                    for l in lines.iter().take(10) { ui.label(RichText::new(l).size(13.0).color(p.muted)); }
+                }
+            }
+            if let Some(pr) = self.upd.progress {
+                ui.add_space(2.0);
+                meter(ui, &p, pr, p.accent, 8.0);
+                ui.label(RichText::new(if pr > 0.0 { format!("Downloading… {:.0}%", pr * 100.0) } else { "Starting…".to_string() }).size(12.5).color(p.muted));
+            }
+            if let Some(m) = &self.upd.done { status(ui, &p, p.ok, ic::CHECK, m); }
+            if let Some(e) = &self.upd.error { status(ui, &p, p.bad, ic::WARNING, e); }
+            if let Some(hv) = &self.host_version {
+                kv(ui, &p, "PC host", hv);
+                if hv != update::CURRENT { ui.label(RichText::new(format!("The PC host runs {hv} and this app is {}. Update the one that is behind.", update::CURRENT)).size(12.5).color(p.warn)); }
+            }
+            ui.add_space(2.0);
+            ui.horizontal_wrapped(|ui| {
+                ui.spacing_mut().item_spacing = Vec2::new(8.0, 8.0);
+                if let (Some(r), false) = (&avail, self.upd.busy) {
+                    if pill_button(ui, &p, ic::DOWNLOAD, &format!("Update to {}", r.version), true).clicked() { do_update = true; }
+                }
+                if self.upd.done.is_some() && !MOBILE && pill_button(ui, &p, ic::SYNC, "Restart now", true).clicked() { restart = true; }
+                if pill_button(ui, &p, ic::REFRESH, "Check for updates", false).clicked() && !self.upd.checking && !self.upd.busy { do_check = true; }
+                if pill_button(ui, &p, ic::LIST, "What changed", false).clicked() { show = true; }
+            });
+            if let Some(t) = self.upd.checked {
+                let m = t.elapsed().as_secs() / 60;
+                ui.label(RichText::new(if m == 0 { "Checked just now".to_string() } else { format!("Checked {m} min ago") }).size(12.0).color(p.faint));
+            }
+        });
+        if do_update { self.start_update(&ctx); }
+        if do_check { self.check_updates(&ctx); }
+        if show { self.changes = Some(None); }
+        #[cfg(not(target_os = "android"))]
+        if restart { update::restart(); }
+        let _ = restart;
     }
 
     fn settings_tab(&mut self, ui: &mut egui::Ui, width: f32) {
@@ -548,6 +663,7 @@ impl App {
                 self.local = None;
             }
         });
+        self.updates_card(ui, width);
         card(ui, &p, width, None, |ui| {
             card_title(ui, &p, ic::PALETTE, "Appearance");
             let src = if MOBILE {
@@ -668,6 +784,26 @@ impl App {
                     ui.set_width(w);
                     split(ui, 44.0, |ui| { ui.label(heading(title, if self.compact { 24.0 } else { 28.0 }, p.text)); }, |ui| self.status_pill(ui));
                     ui.add_space(4.0);
+                    if self.tab == Tab::Dashboard {
+                        if let Some(r) = self.update_available().cloned() {
+                            let (mut go, mut details) = (false, false);
+                            card(ui, &p, w, None, |ui| {
+                                split(ui, 44.0, |ui| {
+                                    badge(ui, &p, ic::UPDATE, 36.0, p.accent, true);
+                                    ui.vertical(|ui| {
+                                        ui.spacing_mut().item_spacing.y = 0.0;
+                                        ui.label(RichText::new(format!("Version {} is ready", r.version)).font(FontId::new(14.5, bold())).color(p.text));
+                                        ui.label(RichText::new(format!("You have {}", update::CURRENT)).size(12.0).color(p.muted));
+                                    });
+                                }, |ui| {
+                                    if pill_button(ui, &p, ic::DOWNLOAD, "Update", true).clicked() { go = true; }
+                                    if pill_button(ui, &p, "", "Details", false).clicked() { details = true; }
+                                });
+                            });
+                            if go { self.tab = Tab::Settings; self.start_update(&ui.ctx().clone()); }
+                            if details { self.tab = Tab::Settings; }
+                        }
+                    }
                     match self.tab {
                         Tab::Dashboard => self.dashboard(ui, w),
                         Tab::Power => self.power(ui, w),
@@ -711,8 +847,9 @@ impl App {
             let rect = rect.shrink2(Vec2::new(10.0, 0.0));
             if sel { ui.painter().rect_filled(rect, CornerRadius::same(12), p.tint); }
             else if resp.hovered() { ui.painter().rect_filled(rect, CornerRadius::same(12), p.raised); }
-            ui.painter().text(Pos2::new(rect.min.x + 16.0, rect.center().y), Align2::LEFT_CENTER, glyph, FontId::new(19.0, egui::FontFamily::Proportional), if sel { p.accent } else { p.muted });
+            ui.painter().text(Pos2::new(rect.min.x + 18.0, rect.center().y), Align2::LEFT_CENTER, glyph, ifont(20.0, if sel { 2 } else { 0 }), if sel { p.accent } else { p.muted });
             ui.painter().text(Pos2::new(rect.min.x + 46.0, rect.center().y), Align2::LEFT_CENTER, label, FontId::new(14.5, bold()), if sel { p.text } else { p.muted });
+            if tab == Tab::Settings && self.update_available().is_some() { ui.painter().circle_filled(Pos2::new(rect.max.x - 22.0, rect.center().y), 5.0, p.accent); }
             if resp.clicked() { self.tab = tab; }
         }
     }
@@ -728,8 +865,9 @@ impl App {
                 let (rect, resp) = ui.allocate_exact_size(Vec2::new(w, 64.0), Sense::click());
                 let pill = Rect::from_center_size(Pos2::new(rect.center().x, rect.min.y + 20.0), Vec2::new(54.0, 30.0));
                 if sel { ui.painter().rect_filled(pill, CornerRadius::same(99), p.tint); }
-                ui.painter().text(pill.center(), Align2::CENTER_CENTER, glyph, FontId::new(21.0, egui::FontFamily::Proportional), if sel { p.accent } else { p.muted });
+                ui.painter().text(pill.center(), Align2::CENTER_CENTER, glyph, ifont(22.0, if sel { 2 } else { 0 }), if sel { p.accent } else { p.muted });
                 ui.painter().text(Pos2::new(rect.center().x, rect.min.y + 46.0), Align2::CENTER_CENTER, label, FontId::new(11.5, bold()), if sel { p.text } else { p.muted });
+                if tab == Tab::Settings && self.update_available().is_some() { ui.painter().circle_filled(Pos2::new(pill.max.x - 10.0, pill.min.y + 4.0), 4.5, p.accent); }
                 if resp.clicked() { self.tab = tab; }
             }
         });
@@ -805,5 +943,24 @@ impl eframe::App for App {
                 self.page(ui);
             }
         });
+    
+        if let Some(since) = self.changes.clone() {
+            let mut open = true;
+            let w = (ui.ctx().content_rect().width() - 32.0).clamp(260.0, 440.0);
+            egui::Window::new(RichText::new(if since.is_some() { "What's new" } else { "What changed" }).font(FontId::new(16.0, bold())))
+                .open(&mut open).collapsible(false).resizable(false).anchor(Align2::CENTER_CENTER, Vec2::ZERO).min_width(w).max_width(w)
+                .show(ui.ctx(), |ui| {
+                    egui::ScrollArea::vertical().max_height(ui.ctx().content_rect().height() * 0.6).show(ui, |ui| {
+                        for (v, md) in update::NOTES.iter().rev() {
+                            if since.as_deref().map_or(false, |s| !update::newer(v, s)) { continue; }
+                            ui.add_space(4.0);
+                            ui.label(RichText::new(format!("PC Control {v}")).font(FontId::new(14.5, bold())).color(p.text));
+                            for l in update::plain(md) { ui.label(RichText::new(l).size(13.0).color(p.muted)); }
+                            ui.add_space(6.0);
+                        }
+                    });
+                });
+            if !open { self.changes = None; }
+        }
     }
 }

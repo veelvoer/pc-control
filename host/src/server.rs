@@ -68,6 +68,7 @@ async fn conn(sock: tokio::net::TcpStream, acc: TlsAcceptor, inj: Shared, token:
     }
     let hostname = std::fs::read_to_string("/etc/hostname").map(|s| s.trim().to_string()).unwrap_or_else(|_| "pc".into());
     wr.send(Message::Binary(enc(&HostMsg::AuthOk { hostname }).into())).await?;
+    wr.send(Message::Binary(enc(&HostMsg::Version(env!("CARGO_PKG_VERSION").to_string())).into())).await?;
     // The service can start before logind grants /dev/uinput access at login, so retry per connection.
     let unavailable = {
         let mut g = inj.lock().unwrap();

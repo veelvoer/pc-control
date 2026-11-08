@@ -43,6 +43,8 @@ pub enum HostMsg {
     Pong,
     Error(String),
     Theme(ThemeColors),
+    /// Host program version, sent after AuthOk (appended so older clients just ignore it).
+    Version(String),
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, Default)]

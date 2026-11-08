@@ -1,4 +1,4 @@
-use crate::theme::{bold, Palette};
+use crate::theme::{bold, ifont, mix, Palette};
 use eframe::egui::{
     self, epaint::{Mesh, Vertex}, Align2, Color32, CornerRadius, FontId, Frame, Margin, Pos2, Rect, Response, RichText,
     Sense, Shape, Stroke, Ui, Vec2,
@@ -8,7 +8,36 @@ pub fn heading(text: impl Into<String>, size: f32, color: Color32) -> RichText {
     RichText::new(text).font(FontId::new(size, bold())).color(color)
 }
 pub fn icon(glyph: &str, size: f32, color: Color32) -> RichText {
-    RichText::new(glyph).size(size).color(color)
+    RichText::new(glyph).font(ifont(size, 1)).color(color)
+}
+
+/// Rounded tinted square with a centred icon.
+pub fn badge(ui: &mut Ui, p: &Palette, glyph: &str, size: f32, color: Color32, round: bool) -> Rect {
+    let (rect, _) = ui.allocate_exact_size(Vec2::splat(size), Sense::hover());
+    paint_badge(ui, p, rect, glyph, color, round, 1);
+    rect
+}
+
+pub fn paint_badge(ui: &Ui, p: &Palette, rect: Rect, glyph: &str, color: Color32, round: bool, weight: u8) {
+    let r = if round { CornerRadius::same(99) } else { CornerRadius::same((rect.width() * 0.3) as u8) };
+    ui.painter().rect_filled(rect, r, mix(p.card, color, 0.17));
+    ui.painter().text(rect.center(), Align2::CENTER_CENTER, glyph, ifont(rect.width() * 0.52, weight), color);
+}
+
+/// Two-line metric: badge, big value, small label. Fixed height so tiles stay aligned.
+pub fn metric_row(ui: &mut Ui, p: &Palette, glyph: &str, color: Color32, value: &str, label: &str) {
+    let (rect, _) = ui.allocate_exact_size(Vec2::new(ui.available_width(), 44.0), Sense::hover());
+    paint_badge(ui, p, Rect::from_min_size(rect.min, Vec2::splat(40.0)), glyph, color, true, 1);
+    ui.painter().text(Pos2::new(rect.min.x + 52.0, rect.min.y + 14.0), Align2::LEFT_CENTER, value, FontId::new(18.0, bold()), p.text);
+    ui.painter().text(Pos2::new(rect.min.x + 52.0, rect.min.y + 33.0), Align2::LEFT_CENTER, label, FontId::new(12.0, egui::FontFamily::Proportional), p.muted);
+}
+
+/// One-line row: small badge, label on the left, value on the right.
+pub fn info_row(ui: &mut Ui, p: &Palette, glyph: &str, label: &str, value: &str) {
+    let (rect, _) = ui.allocate_exact_size(Vec2::new(ui.available_width(), 34.0), Sense::hover());
+    paint_badge(ui, p, Rect::from_min_size(Pos2::new(rect.min.x, rect.center().y - 14.0), Vec2::splat(28.0)), glyph, p.accent, false, 1);
+    ui.painter().text(Pos2::new(rect.min.x + 40.0, rect.center().y), Align2::LEFT_CENTER, label, FontId::new(13.5, egui::FontFamily::Proportional), p.muted);
+    ui.painter().text(Pos2::new(rect.max.x, rect.center().y), Align2::RIGHT_CENTER, value, FontId::new(14.5, bold()), p.text);
 }
 
 /// Fixed-size card. `w`/`h` are outer sizes.
@@ -31,16 +60,17 @@ pub fn card(ui: &mut Ui, p: &Palette, w: f32, h: Option<f32>, add: impl FnOnce(&
 
 pub fn card_title(ui: &mut Ui, p: &Palette, glyph: &str, title: &str) {
     ui.horizontal(|ui| {
-        ui.spacing_mut().item_spacing.x = 8.0;
-        ui.label(icon(glyph, 16.0, p.accent));
-        ui.label(RichText::new(title).font(FontId::new(13.0, bold())).color(p.muted));
+        ui.spacing_mut().item_spacing.x = 10.0;
+        badge(ui, p, glyph, 28.0, p.accent, false);
+        ui.label(RichText::new(title).font(FontId::new(14.0, bold())).color(p.text));
     });
+    ui.add_space(2.0);
 }
 
 pub fn chip(ui: &mut Ui, p: &Palette, glyph: &str, text: &str, color: Color32) {
     let paint = ui.painter();
     let t = paint.layout_no_wrap(text.to_string(), FontId::new(12.0, bold()), p.text);
-    let i = paint.layout_no_wrap(glyph.to_string(), FontId::new(13.0, egui::FontFamily::Proportional), color);
+    let i = paint.layout_no_wrap(glyph.to_string(), ifont(13.0, 1), color);
     let iw = if glyph.is_empty() { 0.0 } else { i.size().x + 6.0 };
     let size = Vec2::new(t.size().x + iw + 20.0, 26.0);
     let (rect, _) = ui.allocate_exact_size(size, Sense::hover());
@@ -74,27 +104,37 @@ pub fn meter(ui: &mut Ui, p: &Palette, frac: f32, color: Color32, h: f32) {
     }
 }
 
-/// Circular gauge with a centred value.
+/// Circular gauge with a centred value. Track and arc share one polyline geometry so they stay concentric.
 pub fn ring(ui: &mut Ui, p: &Palette, frac: f32, size: f32, color: Color32, big: &str, small: &str) {
+    use std::f32::consts::{FRAC_PI_2, TAU};
     let (rect, _) = ui.allocate_exact_size(Vec2::splat(size), Sense::hover());
-    let c = rect.center();
-    let w = (size * 0.11).max(6.0);
-    let r = size / 2.0 - w / 2.0;
+    let c = Pos2::new(rect.center().x.round(), rect.center().y.round());
+    let w = (size * 0.1).round().max(6.0);
+    let r = (size / 2.0 - w / 2.0 - 1.0).floor();
     let pt = |a: f32| Pos2::new(c.x + r * a.cos(), c.y + r * a.sin());
+    let arc = |from: f32, to: f32| -> Vec<Pos2> {
+        let n = (((to - from).abs() / TAU) * 120.0).ceil().max(2.0) as usize;
+        (0..=n).map(|i| pt(from + (to - from) * i as f32 / n as f32)).collect()
+    };
     let paint = ui.painter();
-    paint.circle_stroke(c, r, Stroke::new(w, p.line));
+    paint.add(Shape::line(arc(-FRAC_PI_2, -FRAC_PI_2 + TAU), Stroke::new(w, p.line)));
     let f = frac.clamp(0.0, 1.0);
-    if f > 0.002 {
-        let start = -std::f32::consts::FRAC_PI_2;
-        let n = ((f * 72.0) as usize).max(2);
-        let pts: Vec<Pos2> = (0..=n).map(|i| pt(start + f * std::f32::consts::TAU * i as f32 / n as f32)).collect();
-        paint.add(Shape::line(pts.clone(), Stroke::new(w, color)));
-        for e in [pts[0], pts[n]] { paint.circle_filled(e, w / 2.0, color); }
+    if f > 0.004 {
+        let pts = arc(-FRAC_PI_2, -FRAC_PI_2 + f * TAU);
+        let (a0, a1) = (pts[0], *pts.last().unwrap());
+        paint.add(Shape::line(pts, Stroke::new(w, color)));
+        paint.circle_filled(a0, w / 2.0, color);
+        paint.circle_filled(a1, w / 2.0, color);
     }
-    paint.text(Pos2::new(c.x, c.y - if small.is_empty() { 0.0 } else { size * 0.06 }), Align2::CENTER_CENTER, big, FontId::new(size * 0.26, bold()), p.text);
-    if !small.is_empty() {
-        paint.text(Pos2::new(c.x, c.y + size * 0.19), Align2::CENTER_CENTER, small, FontId::new(size * 0.12, egui::FontFamily::Proportional), p.muted);
-    }
+    // Centre the value + caption as one block.
+    let gb = paint.layout_no_wrap(big.to_string(), FontId::new(size * 0.25, bold()), p.text);
+    let gs = (!small.is_empty()).then(|| paint.layout_no_wrap(small.to_string(), FontId::new((size * 0.115).max(11.0), egui::FontFamily::Proportional), p.muted));
+    let gap = 2.0;
+    let total = gb.size().y + gs.as_ref().map_or(0.0, |g| g.size().y + gap);
+    let mut y = c.y - total / 2.0;
+    paint.galley(Pos2::new(c.x - gb.size().x / 2.0, y), gb.clone(), p.text);
+    y += gb.size().y + gap;
+    if let Some(g) = gs { paint.galley(Pos2::new(c.x - g.size().x / 2.0, y), g, p.muted); }
 }
 
 pub struct Series<'a> { pub name: &'a str, pub data: Vec<f32>, pub color: Color32 }
@@ -169,7 +209,7 @@ pub fn pill_button(ui: &mut Ui, p: &Palette, glyph: &str, text: &str, selected: 
     let h = if crate::theme::MOBILE { 40.0 } else { 34.0 };
     let font = FontId::new(13.5, bold());
     let g = ui.painter().layout_no_wrap(text.to_string(), font.clone(), p.text);
-    let ig = ui.painter().layout_no_wrap(glyph.to_string(), FontId::new(16.0, egui::FontFamily::Proportional), p.text);
+    let ig = ui.painter().layout_no_wrap(glyph.to_string(), ifont(17.0, 1), p.text);
     let gap = if glyph.is_empty() || text.is_empty() { 0.0 } else { 6.0 };
     let (iw, tw) = (if glyph.is_empty() { 0.0 } else { ig.size().x }, if text.is_empty() { 0.0 } else { g.size().x });
     let w = (iw + gap + tw + 28.0).max(h);
@@ -178,7 +218,7 @@ pub fn pill_button(ui: &mut Ui, p: &Palette, glyph: &str, text: &str, selected: 
     ui.painter().rect_filled(rect, CornerRadius::same(99), if resp.is_pointer_button_down_on() { crate::theme::mix(bg, p.accent, 0.3) } else { bg });
     let mut x = rect.center().x - (iw + gap + tw) / 2.0;
     if !glyph.is_empty() {
-        ui.painter().text(Pos2::new(x, rect.center().y), Align2::LEFT_CENTER, glyph, FontId::new(16.0, egui::FontFamily::Proportional), fg);
+        ui.painter().text(Pos2::new(x, rect.center().y), Align2::LEFT_CENTER, glyph, ifont(17.0, 1), fg);
         x += iw + gap;
     }
     if !text.is_empty() { ui.painter().text(Pos2::new(x, rect.center().y), Align2::LEFT_CENTER, text, font, fg); }

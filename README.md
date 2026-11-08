@@ -15,6 +15,10 @@ Lightweight Rust remote control for a Linux PC: live screen, mouse/keyboard, sys
 
 `docs/screenshots/b-*.png` are the visual bugs found during polishing (layout overflow on narrow windows, low-contrast confirm tile, oversized sliders, …); `a-*.png` are the fixed versions. They were captured with `scripts/dev-shot.sh`.
 
+## Updates
+
+Settings → Updates checks GitHub for the newest release (on start and every 6 hours). On the PC, **Update** downloads the new AppImage, verifies its checksum, installs it and restarts the host service. On Android it hands the APK to the system download manager; open the notification to install. **What changed** shows the patch notes bundled with the app, and after an update the notes appear once.
+
 ## Install (Arch / Linux PC)
 
 ```bash

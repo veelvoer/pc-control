@@ -97,6 +97,11 @@ impl Palette {
     }
 }
 
+/// Icon font at a weight: 0 regular, 1 bold, 2 fill.
+pub fn ifont(size: f32, weight: u8) -> FontId {
+    FontId::new(size, FontFamily::Name(match weight { 0 => "icons", 1 => "icons-bold", _ => "icons-fill" }.into()))
+}
+
 pub fn bold() -> FontFamily { FontFamily::Name("bold".into()) }
 
 pub fn install_fonts(ctx: &egui::Context) {
@@ -104,10 +109,14 @@ pub fn install_fonts(ctx: &egui::Context) {
     let add = |f: &mut FontDefinitions, n: &str, b: &'static [u8]| { f.font_data.insert(n.into(), Arc::new(FontData::from_static(b))); };
     add(&mut f, "Montserrat", include_bytes!("../assets/Montserrat-Regular.ttf"));
     add(&mut f, "MontserratSemi", include_bytes!("../assets/Montserrat-SemiBold.ttf"));
-    add(&mut f, "Phosphor", include_bytes!("../assets/Phosphor.ttf"));
+    add(&mut f, "PhosphorReg", include_bytes!("../assets/PhosphorReg.ttf"));
+    add(&mut f, "PhosphorBold", include_bytes!("../assets/PhosphorBold.ttf"));
+    add(&mut f, "PhosphorFill", include_bytes!("../assets/PhosphorFill.ttf"));
+    for (fam, font) in [("icons", "PhosphorReg"), ("icons-bold", "PhosphorBold"), ("icons-fill", "PhosphorFill")] {
+        f.families.insert(FontFamily::Name(fam.into()), vec![font.to_string()]);
+    }
     let prop = f.families.entry(FontFamily::Proportional).or_default();
     prop.insert(0, "Montserrat".into());
-    prop.push("Phosphor".into());
     let mut b = vec!["MontserratSemi".to_string(), "Montserrat".to_string()];
     b.extend(f.families[&FontFamily::Proportional].iter().skip(1).cloned());
     f.families.insert(bold(), b);
