@@ -1,0 +1,8 @@
+[Desktop Entry]
+Type=Application
+Name=PC Control
+Comment=Remote control and monitor your PC
+Exec=pccontrol
+Icon=pc-control
+Categories=Network;RemoteAccess;
+Terminal=false
